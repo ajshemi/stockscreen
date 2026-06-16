@@ -62,15 +62,19 @@ def get_trailing_pe(symbol: str) -> Optional[float]:
 def get_most_recent_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
     """
     Returns the most recent past earnings announcement date.
-    Prefers ticker.earnings_dates; falls back to ticker.calendar.
+    Prefers ticker.earnings_dates (requires lxml); falls back to ticker.calendar,
+    then to the most recent quarterly income statement date.
     """
     t = _ticker(symbol)
     try:
         df = t.earnings_dates
         if df is not None and not df.empty:
-            past = df[df.index.tz_localize(None) < pd.Timestamp.now()]
+            # Index is tz-aware; convert to naive UTC for comparison
+            naive_idx = df.index.tz_convert(None)
+            past_mask = naive_idx < pd.Timestamp.now()
+            past = df[past_mask]
             if not past.empty:
-                return past.index[0].tz_localize(None)
+                return past.index[0].tz_convert(None)
     except Exception as e:
         logger.debug("earnings_dates unavailable for %s: %s", symbol, e)
 
@@ -84,6 +88,17 @@ def get_most_recent_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
                     return pd.Timestamp(past[0])
     except Exception as e:
         logger.debug("calendar unavailable for %s: %s", symbol, e)
+
+    # Last resort: use the most recent quarterly income statement date as a proxy.
+    # The actual announcement is typically within 4 weeks of quarter-end.
+    try:
+        stmt = t.quarterly_income_stmt
+        if stmt is not None and not stmt.empty:
+            most_recent = stmt.columns.max()
+            if pd.Timestamp(most_recent) < pd.Timestamp.now():
+                return pd.Timestamp(most_recent)
+    except Exception as e:
+        logger.debug("income statement date fallback failed for %s: %s", symbol, e)
 
     return None
 
