@@ -59,25 +59,59 @@ def get_trailing_pe(symbol: str) -> Optional[float]:
     return float(pe) if pe else None
 
 
-def get_most_recent_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
+def get_earnings_reaction_info(symbol: str) -> Optional[dict]:
     """
-    Returns the most recent past earnings announcement date.
-    Prefers ticker.earnings_dates (requires lxml); falls back to ticker.calendar,
-    then to the most recent quarterly income statement date.
+    Returns timing information for the most recent earnings announcement so that
+    step 5 can evaluate the correct trading day's reaction.
+
+    Returned dict keys:
+        announcement_date : pd.Timestamp  — when earnings were reported (tz-naive)
+        reaction_date     : pd.Timestamp  — trading day to measure market reaction
+        timing            : str           — 'AMC', 'BMO', or 'unknown (assumed AMC)'
+
+    Logic:
+        - AMC (after market close, timestamp hour >= 12): reaction shows on the
+          NEXT trading day because the market was already closed.
+        - BMO (before market open, timestamp hour < 12): reaction shows on the
+          SAME trading day after the open.
+        - Unknown timing: default to next trading day (AMC is more common for
+          large-cap US companies).
+
+    get_price_return_on_date() uses searchsorted over actual trading days, so
+    passing a weekend or holiday as reaction_date automatically resolves to the
+    following Monday / next trading session.
     """
     t = _ticker(symbol)
+
+    # ── Primary: earnings_dates (requires lxml) ───────────────────────────────
     try:
         df = t.earnings_dates
         if df is not None and not df.empty:
-            # Index is tz-aware; convert to naive UTC for comparison
             naive_idx = df.index.tz_convert(None)
-            past_mask = naive_idx < pd.Timestamp.now()
-            past = df[past_mask]
+            past = df[naive_idx < pd.Timestamp.now()]
             if not past.empty:
-                return past.index[0].tz_convert(None)
+                ts = past.index[0]                      # tz-aware timestamp
+                announcement_date = ts.tz_convert(None) # strip tz, keep local time
+                hour = ts.hour                          # hour in exchange local time
+
+                if hour >= 12:
+                    # After market close — reaction is next trading day
+                    reaction_date = announcement_date + pd.Timedelta(days=1)
+                    timing = "AMC"
+                else:
+                    # Before market open — reaction is same trading day
+                    reaction_date = announcement_date
+                    timing = "BMO"
+
+                return {
+                    "announcement_date": announcement_date,
+                    "reaction_date": reaction_date,
+                    "timing": timing,
+                }
     except Exception as e:
         logger.debug("earnings_dates unavailable for %s: %s", symbol, e)
 
+    # ── Fallback: calendar (no timing info) ──────────────────────────────────
     try:
         cal = t.calendar
         if cal is not None and "Earnings Date" in cal:
@@ -85,20 +119,28 @@ def get_most_recent_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
             if isinstance(dates, list):
                 past = [d for d in dates if pd.Timestamp(d) < pd.Timestamp.now()]
                 if past:
-                    return pd.Timestamp(past[0])
+                    announcement_date = pd.Timestamp(past[0])
+                    return {
+                        "announcement_date": announcement_date,
+                        "reaction_date": announcement_date + pd.Timedelta(days=1),
+                        "timing": "unknown (assumed AMC)",
+                    }
     except Exception as e:
         logger.debug("calendar unavailable for %s: %s", symbol, e)
 
-    # Last resort: use the most recent quarterly income statement date as a proxy.
-    # The actual announcement is typically within 4 weeks of quarter-end.
+    # ── Last resort: most recent income-statement quarter-end date ────────────
     try:
         stmt = t.quarterly_income_stmt
         if stmt is not None and not stmt.empty:
-            most_recent = stmt.columns.max()
-            if pd.Timestamp(most_recent) < pd.Timestamp.now():
-                return pd.Timestamp(most_recent)
+            most_recent = pd.Timestamp(stmt.columns.max())
+            if most_recent < pd.Timestamp.now():
+                return {
+                    "announcement_date": most_recent,
+                    "reaction_date": most_recent + pd.Timedelta(days=1),
+                    "timing": "unknown (assumed AMC)",
+                }
     except Exception as e:
-        logger.debug("income statement date fallback failed for %s: %s", symbol, e)
+        logger.debug("income statement fallback failed for %s: %s", symbol, e)
 
     return None
 
