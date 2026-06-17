@@ -1,25 +1,38 @@
 """
 Step 4 — PE Ratio < EPS Growth Rate.
 
-A PE ratio below the EPS growth rate means the stock is cheap relative to its
-growth momentum (analogous to a PEG ratio < 1).
+PE is computed as: stock_price / (4 × quarterly_eps)
+Using 4× a single quarter's EPS annualises it, matching the book's method.
 
-Pass condition: trailing_PE < eps_growth_pct
+For the most recent quarter the orchestrator passes the current stock price.
+For historical quarters it passes the closing price on the earnings announcement
+date, giving a historically accurate "PE at the time of the report."
+
+Pass condition: computed_pe < eps_growth_pct
 """
-from typing import Any
-
-from .data_fetcher import get_trailing_pe
+from typing import Any, Optional
 
 
-def run(symbol: str, eps_growth: float) -> dict[str, Any]:
-    pe = get_trailing_pe(symbol)
+def run(
+    eps_growth: float,
+    quarterly_eps: float,
+    stock_price: Optional[float],
+) -> dict[str, Any]:
 
-    if pe is None:
+    if stock_price is None or stock_price <= 0:
         return _fail(
-            "Trailing PE ratio unavailable (stock may not yet be profitable)",
+            "Stock price unavailable; cannot compute PE",
             {"eps_growth_pct": eps_growth},
         )
 
+    if quarterly_eps <= 0:
+        return _fail(
+            f"Quarterly EPS is {quarterly_eps:.4f} (non-positive); PE undefined",
+            {"eps_growth_pct": eps_growth, "quarterly_eps": quarterly_eps},
+        )
+
+    annualised_eps = quarterly_eps * 4
+    pe = stock_price / annualised_eps
     passed = pe < eps_growth
     peg = round(pe / eps_growth, 2) if eps_growth != 0 else None
 
@@ -30,13 +43,16 @@ def run(symbol: str, eps_growth: float) -> dict[str, Any]:
         "value": round(pe, 2),
         "threshold": eps_growth,
         "reason": (
-            f"Trailing PE of {pe:.1f} "
+            f"PE of {pe:.1f} (${stock_price:.2f} / 4×${quarterly_eps:.4f}) "
             f"{'is below' if passed else 'exceeds'} "
             f"EPS growth of {eps_growth:.1f}% "
             f"(PEG-like ratio: {peg})"
         ),
         "data": {
-            "trailing_pe": round(pe, 2),
+            "stock_price": round(stock_price, 2),
+            "quarterly_eps": round(quarterly_eps, 4),
+            "annualised_eps": round(annualised_eps, 4),
+            "computed_pe": round(pe, 2),
             "eps_growth_pct": eps_growth,
             "peg_ratio": peg,
         },

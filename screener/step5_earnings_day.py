@@ -11,11 +11,13 @@ Pass condition: stock return on reaction day > S&P 500 return on same day
 """
 from typing import Any
 
+from typing import Optional
+
 from .data_fetcher import get_earnings_reaction_info, get_market_return_on_date, get_price_return_on_date
 
 
-def run(symbol: str) -> dict[str, Any]:
-    info = get_earnings_reaction_info(symbol)
+def run(symbol: str, earnings_info: Optional[dict] = None) -> dict[str, Any]:
+    info = earnings_info if earnings_info is not None else get_earnings_reaction_info(symbol)
 
     if info is None:
         return _fail(

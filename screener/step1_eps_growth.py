@@ -1,33 +1,53 @@
 """
 Step 1 — EPS Growth > 10% (year-over-year, most recent quarter).
 
-Pass condition: (current_quarter_EPS / same_quarter_prior_year_EPS - 1) * 100 > 10
+EPS source priority:
+  1. earnings_dates.Reported EPS — adjusted/non-GAAP, aligns with the book's
+     "operating income" intent, and gives 20+ quarters of depth for multi-quarter
+     trend analysis.
+  2. quarterly_income_stmt Basic/Diluted EPS — GAAP fallback.
+
+quarter_idx=0  → most recent reported quarter
+quarter_idx=1  → one quarter prior
+quarter_idx=2  → two quarters prior
 """
 from typing import Any
 
-from .data_fetcher import get_quarterly_eps
+from .data_fetcher import get_adjusted_eps_series, get_quarterly_eps
 
 THRESHOLD = 10.0
 
 
-def run(symbol: str) -> dict[str, Any]:
+def run(symbol: str, quarter_idx: int = 0) -> dict[str, Any]:
+    # Try adjusted (non-GAAP) EPS first for better historical depth
+    eps = None
+    eps_label = "Adjusted EPS"
     try:
-        eps = get_quarterly_eps(symbol)
-    except ValueError as e:
-        return _fail(symbol, str(e), {})
+        eps = get_adjusted_eps_series(symbol)
+    except ValueError:
+        pass
 
-    if len(eps) < 5:
+    if eps is None:
+        try:
+            eps = get_quarterly_eps(symbol)
+            eps_label = "GAAP EPS"
+        except ValueError as e:
+            return _fail(str(e), {})
+
+    needed = quarter_idx + 5
+    if len(eps) < needed:
         return _fail(
-            symbol,
-            f"Only {len(eps)} quarters of EPS data available; need at least 5 for YoY comparison",
+            f"Only {len(eps)} quarters of EPS data; need {needed} for quarter_idx={quarter_idx}",
             {},
         )
 
-    recent_date, prior_date = eps.index[0], eps.index[4]
-    recent_val, prior_val = float(eps.iloc[0]), float(eps.iloc[4])
+    recent_date = eps.index[quarter_idx]
+    prior_date  = eps.index[quarter_idx + 4]
+    recent_val  = float(eps.iloc[quarter_idx])
+    prior_val   = float(eps.iloc[quarter_idx + 4])
 
     if prior_val == 0:
-        return _fail(symbol, "Prior-year EPS is zero; cannot compute growth", {
+        return _fail("Prior-year EPS is zero; cannot compute growth", {
             "recent_eps": recent_val,
             "prior_eps": prior_val,
         })
@@ -42,21 +62,33 @@ def run(symbol: str) -> dict[str, Any]:
         "value": round(growth, 2),
         "threshold": THRESHOLD,
         "reason": (
-            f"EPS grew {growth:.1f}% YoY "
-            f"(${prior_val:.4f} in {prior_date.date()} → ${recent_val:.4f} in {recent_date.date()}); "
+            f"{eps_label} grew {growth:.1f}% YoY "
+            f"(${prior_val:.2f} reported ~{_quarter_label(prior_date)} → "
+            f"${recent_val:.2f} reported ~{_quarter_label(recent_date)}); "
             f"threshold is >{THRESHOLD}%"
         ),
         "data": {
+            "quarter_end_date": str(recent_date.date()),
             "recent_quarter": str(recent_date.date()),
             "prior_quarter": str(prior_date.date()),
             "recent_eps": round(recent_val, 4),
             "prior_eps": round(prior_val, 4),
+            "quarterly_eps": round(recent_val, 4),
             "eps_growth_pct": round(growth, 2),
+            "eps_label": eps_label,
         },
     }
 
 
-def _fail(symbol: str, reason: str, data: dict) -> dict[str, Any]:
+def _quarter_label(ts) -> str:
+    """Convert a timestamp to a human-readable quarter label, e.g. Q1 2026."""
+    month = ts.month
+    year  = ts.year
+    q = (month - 1) // 3 + 1
+    return f"Q{q} {year}"
+
+
+def _fail(reason: str, data: dict) -> dict[str, Any]:
     return {
         "step": 1,
         "name": "EPS Growth > 10%",

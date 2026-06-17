@@ -52,11 +52,50 @@ def get_quarterly_revenue(symbol: str) -> pd.Series:
     raise ValueError(f"Cannot find revenue data for {symbol}")
 
 
-def get_trailing_pe(symbol: str) -> Optional[float]:
-    """Returns trailing twelve-month PE ratio, or None if unavailable."""
+def get_adjusted_eps_series(symbol: str) -> pd.Series:
+    """
+    Returns quarterly adjusted (non-GAAP) EPS from earnings_dates.Reported EPS,
+    indexed by announcement date (tz-naive), most-recent first.
+
+    This matches the book's "operating income" intent and goes back 20+ quarters,
+    far deeper than the 5-quarter limit of quarterly_income_stmt.
+    Raises ValueError if data is unavailable.
+    """
+    t = _ticker(symbol)
+    df = t.earnings_dates
+    if df is None or df.empty:
+        raise ValueError(f"No earnings_dates available for {symbol}")
+
+    reported = df["Reported EPS"].dropna()
+    past = reported[reported.index.tz_convert(None) < pd.Timestamp.now()]
+    if past.empty:
+        raise ValueError(f"No past Reported EPS in earnings_dates for {symbol}")
+
+    result = past.sort_index(ascending=False)
+    result.index = result.index.tz_convert(None)
+    return result
+
+
+def get_current_price(symbol: str) -> Optional[float]:
+    """Returns the current stock price."""
     info = _ticker(symbol).info
-    pe = info.get("trailingPE")
-    return float(pe) if pe else None
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    return float(price) if price else None
+
+
+def get_close_price(symbol: str, date: pd.Timestamp) -> Optional[float]:
+    """Returns the closing price on the trading day on or immediately before `date`."""
+    t = _ticker(symbol)
+    start = (date - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+    end = (date + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    hist = t.history(start=start, end=end)
+    if hist.empty:
+        return None
+    hist.index = hist.index.tz_localize(None)
+    idx = hist.index.searchsorted(date, side="right") - 1
+    if idx < 0:
+        return None
+    return float(hist["Close"].iloc[idx])
 
 
 def get_earnings_reaction_info(symbol: str) -> Optional[dict]:
@@ -143,6 +182,67 @@ def get_earnings_reaction_info(symbol: str) -> Optional[dict]:
         logger.debug("income statement fallback failed for %s: %s", symbol, e)
 
     return None
+
+
+def get_all_earnings_reaction_info(symbol: str, n: int = 4) -> list[dict]:
+    """
+    Returns timing info for the `n` most recent past earnings announcements,
+    most-recent first. Each dict contains:
+        announcement_date         : pd.Timestamp  — when reported (tz-naive)
+        reaction_date             : pd.Timestamp  — trading day to measure reaction
+        timing                    : str           — 'AMC', 'BMO', or 'unknown (assumed AMC)'
+        stock_price_on_announcement: float | None — close price on announcement_date
+          (for AMC this is the pre-announcement close; for BMO the same-day close)
+
+    Used by the multi-quarter orchestrator so step 4 can compute a historically
+    accurate PE instead of relying on today's trailing PE.
+    """
+    t = _ticker(symbol)
+    results: list[dict] = []
+
+    try:
+        df = t.earnings_dates
+        if df is not None and not df.empty:
+            naive_idx = df.index.tz_convert(None)
+            past = df[naive_idx < pd.Timestamp.now()]
+            for ts in past.index[:n]:
+                announcement_date = ts.tz_convert(None)
+                hour = ts.hour
+                if hour >= 12:
+                    reaction_date = announcement_date + pd.Timedelta(days=1)
+                    timing = "AMC"
+                else:
+                    reaction_date = announcement_date
+                    timing = "BMO"
+                results.append({
+                    "announcement_date": announcement_date,
+                    "reaction_date": reaction_date,
+                    "timing": timing,
+                    "stock_price_on_announcement": get_close_price(symbol, announcement_date),
+                })
+            if results:
+                return results
+    except Exception as e:
+        logger.debug("earnings_dates unavailable for %s: %s", symbol, e)
+
+    # Fallback: derive dates from income statement quarter-end dates (no timing info)
+    try:
+        stmt = t.quarterly_income_stmt
+        if stmt is not None and not stmt.empty:
+            past_cols = [c for c in stmt.columns if pd.Timestamp(c) < pd.Timestamp.now()]
+            for col in sorted(past_cols, reverse=True)[:n]:
+                announcement_date = pd.Timestamp(col)
+                reaction_date = announcement_date + pd.Timedelta(days=1)
+                results.append({
+                    "announcement_date": announcement_date,
+                    "reaction_date": reaction_date,
+                    "timing": "unknown (assumed AMC)",
+                    "stock_price_on_announcement": get_close_price(symbol, announcement_date),
+                })
+    except Exception as e:
+        logger.debug("income statement fallback failed for %s: %s", symbol, e)
+
+    return results
 
 
 def get_price_return_on_date(symbol: str, date: pd.Timestamp) -> Optional[float]:
