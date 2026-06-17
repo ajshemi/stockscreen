@@ -35,8 +35,12 @@ def run(symbol: str, quarter_idx: int = 0) -> dict[str, Any]:
     recent_val  = float(rev.iloc[quarter_idx])
     prior_val   = float(rev.iloc[quarter_idx + 4])
 
-    if prior_val == 0:
-        return _unavailable("Prior-year revenue is zero; cannot compute growth")
+    import math
+    if prior_val == 0 or math.isnan(prior_val) or math.isnan(recent_val):
+        return _unavailable(
+            f"Revenue data contains NaN for quarter_idx={quarter_idx}; "
+            "yfinance returned incomplete data for this period"
+        )
 
     growth = (recent_val / prior_val - 1) * 100
     passed = growth > THRESHOLD
